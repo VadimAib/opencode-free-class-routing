@@ -70,6 +70,18 @@ free-class-routing: agent=general class=trusted model=acme/paid-model-1 parent=a
 The reason is the fragment of the provider's message that names the cap, not the
 whole sentence.
 
+## Testing
+
+Node 24 runs both suites directly, with no build step and no dependencies:
+
+```sh
+node test/route.test.mjs   # 32 cases, offline, no model calls
+node test/e2e.test.mjs     # 7 cases: setup, a session.created event, the retry hook, the log file
+```
+
+There is no `package.json` on purpose: OpenCode loads `index.ts` by path, so a
+manifest would add nothing to install or to run.
+
 ## Limits
 
 - Only child sessions are routed; the root session is never changed.
