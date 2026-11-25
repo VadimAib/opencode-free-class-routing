@@ -1,18 +1,19 @@
 # opencode-free-class-routing
 
-OpenCode routes a subagent to a free model only when the agent that runs it is
-listed in `freeAgents`. Every other child keeps the model of the root session,
-which is never changed.
+An OpenCode plugin that routes each subagent by the class of its work:
 
-Free models are fine for work a machine checks afterwards: a search, a quoted
-fact, a test run. They are not fine for reviews, plans, security work or anything
-that writes.
+- **FREE** agents run on a free model. Free models are fine for work a machine
+  checks afterwards: a search, a quoted fact, a test run.
+- **TRUSTED** agents keep the root session's model. Reviews, plans, security work
+  and anything that writes are not sent to a free model.
 
-## Install (no npm)
+The root session is never changed.
+
+## Install
 
 No package manager, no build step: OpenCode loads `index.ts` directly.
 
-1. Put this folder anywhere, for example `C:/tools/opencode-free-class-routing`.
+1. Put this folder anywhere.
 2. Add it to `~/.config/opencode/opencode.json` (or a project config):
 
 ```jsonc
@@ -47,8 +48,8 @@ No package manager, no build step: OpenCode loads `index.ts` directly.
 
 ## Behaviour
 
-- FREE agent: the next free model in the chain. When all of them are used up, the
-  child returns to the root session's model.
+- FREE agent: the next free model in the chain. When all are used up, the child
+  returns to the root session's model.
 - TRUSTED agent: the root session's model. On a cap the turn fails; there is no
   fallback to a free model.
 - A free model that reports a daily or free-tier cap is skipped for the rest of
@@ -58,25 +59,19 @@ No package manager, no build step: OpenCode loads `index.ts` directly.
 
 ## Visible decision
 
-The child carries the router's decision itself, so nobody has to open the log:
+The child carries the router's decision itself:
 
-- Its title gets one suffix: ` · trusted`, or ` · free:<model-id>` for example
-  `Ревью SET-3: correctness · free:deepseek-v4.1-flash-free`. A free-class child
-  that had to keep a paid model is labelled ` · free`, so the title never calls a
-  paid model free; its metadata names the model actually used.
+- Its title gets one suffix: ` · trusted`, or ` · free:<model-id>`, for example
+  `Review: correctness · free:deepseek-v4.1-flash-free`. A free-class child that
+  had to keep a paid model is labelled ` · free`; its metadata names the model
+  actually used.
 - Its metadata gets the machine-readable form:
   `{ "class": "free", "model": "opencode/deepseek-v4.1-flash-free", "parent": "acme/paid-model-1" }`.
 
 The suffix is replaced, not appended, so a duplicate event or a plugin reload
-cannot grow the title. The root session is never touched. This writes a title and
-metadata, but no message: no prompt and no synthetic input. A host that refuses
-the update, or an OpenCode too old to have `session.update`, keeps routing: the
-failure is one log line and the child keeps its model. A measured free child kept
-its labelled title after its first real prompt.
-
-The parent chat shows a subagent card with the agent name and the task
-description, not the child's title. The label is visible in the child's own header
-and in the session list; open the child from that card to see it.
+does not grow the title. The label is visible in the child's own header and in
+the session list. Writing it uses no prompt and no synthetic input; if the host
+refuses the update, routing continues and the child keeps its model.
 
 ## Logs
 
@@ -89,27 +84,21 @@ free-class-routing: agent=explore class=free model=opencode/deepseek-v4.1-flash-
 free-class-routing: agent=general class=trusted model=acme/paid-model-1 parent=acme/paid-model-1 reason=subagent started; trusted class, parent model kept
 ```
 
-The reason is the fragment of the provider's message that names the cap, not the
-whole sentence.
-
 ## Testing
 
 Node 24 runs both suites directly, with no build step and no dependencies:
 
 ```sh
-node test/route.test.mjs   # 40 cases, offline, no model calls
-node test/e2e.test.mjs     # 11 cases: setup, session.created, the retry hook, two loaded copies, stop(), the log file, the title/metadata label
+node test/route.test.mjs   # routing and label, offline, no model calls
+node test/e2e.test.mjs     # setup, session events, retry, log file, label
 ```
-
-There is no `package.json` on purpose: OpenCode loads `index.ts` by path, so a
-manifest would add nothing to install or to run.
 
 ## Limits
 
 - Only child sessions are routed; the root session is never changed.
 - A child whose agent has `mode: primary`, and a fork, are left alone.
 - OpenCode may load the plugin more than once per process; a child is routed once.
-- Tested against OpenCode `2.2.5` and the desktop app `2.4.1` on 2026-11-24. It
+- Tested against OpenCode `2.2.5` and the desktop app `2.4.1` on 2026-11-25. It
   uses the session event stream and the `retry` hook; if a future version removes
   either, it logs one line and stays out of the way.
 
