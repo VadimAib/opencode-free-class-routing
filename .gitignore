@@ -1,0 +1,23 @@
+# Development-only files. Users need index.ts, README.md and LICENSE;
+# the test needs index.ts and nothing else.
+#
+# Working notes for this machine stay local; this branch is the public tree.
+AGENTS.md
+HANDOFF.md
+node_modules/
+dist/
+scripts/
+.github/
+package.json
+package-lock.json
+tsconfig*.json
+NOTICE.md
+*.test.ts
+*.log
+*.tgz
+.env
+opencode.json
+opencode.jsonc
+.opencode/
+.DS_Store
+Thumbs.db
