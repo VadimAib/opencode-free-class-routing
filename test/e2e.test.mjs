@@ -26,11 +26,15 @@ const catalog = [
   { ...ref(PAID), cost: [{ input: 1 }], capabilities: { tools: true } },
 ]
 
-function host(sessions, options) {
+function host(sessions, options, { reset = true, late = false } = {}) {
   // Each case stands for a fresh process: the routing markers are process-wide.
-  globalThis.__subagentRoutingSeen = new Set()
-  globalThis.__freeClassRetrySeen = new Set()
-  globalThis.__freeClassExhausted = new Map()
+  // `reset: false` is a second copy of the plugin in that same process; `late`
+  // is a host that keeps delivering queued events after the signal is aborted.
+  if (reset) {
+    globalThis.__subagentRoutingSeen = new Set()
+    globalThis.__freeClassRetrySeen = new Set()
+    globalThis.__freeClassExhausted = new Map()
+  }
   const switches = []
   const retry = {}
   let push
@@ -61,8 +65,9 @@ function host(sessions, options) {
         push = (event) => queue.push(event)
         return (async function* () {
           for (;;) {
-            if (signal?.aborted) return
+            if (signal?.aborted && !late) return
             if (queue.length === 0) {
+              if (signal?.aborted) return
               await new Promise((r) => setTimeout(r, 5))
               continue
             }
@@ -257,6 +262,79 @@ const sessions = () => ({
   if (lines.length !== 2) throw new Error(`case 7: ${lines.length} lines\n${lines.join("\n")}`)
   stop()
   console.log("7 ok later structural evidence is routed")
+}
+
+// 8. Two loaded copies in one process: a child is routed once, one failure is
+//    switched once and logged once, and both copies share the three markers.
+{
+  const s = sessions()
+  s.child2 = { id: "child2", parentID: "root", agent: "explore", model: ref(FREE[0]) }
+  const h1 = host(s, { freeModels: FREE, freeAgents: ["explore"] })
+  const h2 = host(s, { freeModels: FREE, freeAgents: ["explore"] }, { reset: false })
+  const at = mark()
+  const total = () => h1.switches.length + h2.switches.length
+  const all = () => [...h1.switches, ...h2.switches]
+  const stop1 = await plugin.setup(h1.ctx)
+  const stop2 = await plugin.setup(h2.ctx)
+  if (!stop1 || !stop2) throw new Error("case 8: setup returned no stop")
+
+  // Created path: the same event reaches both copies, one switch is enough.
+  h1.push({ data: { sessionID: "child", parentID: "root", agent: "explore" } })
+  h2.push({ data: { sessionID: "child", parentID: "root", agent: "explore" } })
+  await tick(() => total() === 1, "one switch for two copies")
+  await tick(() => h1.pending() === 0 && h2.pending() === 0, "created events drained")
+  await settle()
+  if (total() !== 1) throw new Error(`case 8: created path switched ${total()} times`)
+  if (since(at).length !== 1) throw new Error(`case 8: ${since(at).length} created lines\n${since(at).join("\n")}`)
+
+  // Retry path: both hooks see the same failure, one switch and one line.
+  const retryAt = mark()
+  const event = { sessionID: "child2", model: ref(FREE[0]), error: { status: 429, message: "free usage limit reached" } }
+  await h1.retry.retry(event)
+  await h2.retry.retry(event)
+  if (total() !== 2) throw new Error(`case 8: retry switched ${total() - 1} times\n${all().join(", ")}`)
+  const moved = all().filter((entry) => entry.startsWith("child2 "))
+  if (moved.length !== 1 || moved[0] !== `child2 ${FREE[1]}`) throw new Error(`case 8: ${JSON.stringify(all())}`)
+  if (since(retryAt).length !== 1) throw new Error(`case 8: ${since(retryAt).length} retry lines\n${since(retryAt).join("\n")}`)
+
+  // Exhausted is shared too: the first copy parks FREE[1] in a retry the second
+  // copy never sees the hook for. The second copy must treat both free models as
+  // used up and send its new child back to the parent model.
+  s.child3 = { id: "child3", parentID: "root", agent: "explore", model: ref(FREE[0]) }
+  s.child4 = { id: "child4", parentID: "root", agent: "explore", model: ref(FREE[1]) }
+  const parkedAt = mark()
+  await h1.retry.retry({ sessionID: "child4", model: ref(FREE[1]), error: { status: 429, message: "free usage limit reached" } })
+  const thirdAt = mark()
+  h2.push({ data: { sessionID: "child3", parentID: "root", agent: "explore" } })
+  await tick(() => total() === 4, "third child routed")
+  await settle()
+  const third = all().filter((entry) => entry.startsWith("child3 "))
+  if (third.length !== 1 || third[0] !== `child3 ${PAID}`) throw new Error(`case 8: ${JSON.stringify(third)}`)
+  if (since(thirdAt).length !== 1) throw new Error(`case 8: ${since(thirdAt).length} third lines\n${since(thirdAt).join("\n")}`)
+  if (since(parkedAt).length !== 2) throw new Error(`case 8: ${since(parkedAt).length} park+third lines\n${since(parkedAt).join("\n")}`)
+  stop1()
+  stop2()
+  console.log("8 ok two copies -> one switch, one line per child, markers shared")
+}
+
+// 9. After stop(), a host that still delivers a queued event changes nothing:
+//    the dead flag in onCreated ends routing.
+{
+  const s = sessions()
+  s.child2 = { id: "child2", parentID: "root", agent: "explore", model: ref(PAID) }
+  const h = host(s, { freeModels: FREE, freeAgents: ["explore"] }, { late: true })
+  const stop = await plugin.setup(h.ctx)
+  stop()
+  const at = mark()
+  h.push({ data: { sessionID: "child2", parentID: "root", agent: "explore" } })
+  await new Promise((r) => setTimeout(r, 150))
+  if (h.switches.length !== 0) throw new Error(`case 9: switched after stop: ${h.switches.join(", ")}`)
+  const lines = since(at)
+  if (lines.length !== 0) throw new Error(`case 9: ${lines.length} lines after stop\n${lines.join("\n")}`)
+  if (s.child2.model.providerID !== "acme" || s.child2.model.id !== "paid-model-1") {
+    throw new Error(`case 9: model moved to ${JSON.stringify(s.child2.model)}`)
+  }
+  console.log("9 ok late event after stop -> nothing routed, no line")
 }
 
 console.log("e2e cases passed, log at", LOG)

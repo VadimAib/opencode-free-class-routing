@@ -1,14 +1,30 @@
 // Offline check of the routing logic: fake host, no model calls.
+import { readFileSync, rmSync } from "node:fs"
 import { join } from "node:path"
 import { tmpdir } from "node:os"
 
 // Decisions are appended to a log file under the home directory; keep this run
 // out of the real one. `say()` resolves the path on every call, so setting these
 // before any handler runs is enough.
-process.env.USERPROFILE = join(tmpdir(), "oc-free-class-test-home")
-process.env.HOME = process.env.USERPROFILE
+const home = join(tmpdir(), `oc-free-class-route-${process.pid}`)
+rmSync(home, { recursive: true, force: true })
+process.env.USERPROFILE = home
+process.env.HOME = home
 
 import plugin, * as api from "../index.ts"
+
+const LOG = join(home, ".local", "share", "opencode", "free-class-routing.log")
+
+function logLines() {
+  try {
+    return readFileSync(LOG, "utf8").split("\n").filter((line) => line.includes("free-class-routing:"))
+  } catch {
+    return []
+  }
+}
+
+const mark = () => logLines().length
+const since = (at) => logLines().slice(at)
 
 const FREE = ["opencode/deepseek-v4.1-flash-free", "opencode/mimo-v2.6-flash-free"]
 const PAID = { providerID: "acme", id: "paid-model-1" }
@@ -406,6 +422,55 @@ const base = (extra) => ({
   })
   if (!verdict.quota || !verdict.hard) throw new Error(`case 32: ${JSON.stringify(verdict)}`)
   console.log("32 ok sibling array read")
+}
+
+// 33. An OpenCode without session.hook/switchModel: setup resolves and leaves
+//     exactly one line naming the reason, instead of throwing.
+{
+  const sessions = base({})
+  const h = host(sessions, { freeModels: FREE, freeAgents: ["explore"] })
+  delete h.ctx.session.hook
+  delete h.ctx.session.switchModel
+  const at = mark()
+  await plugin.setup(h.ctx)
+  const lines = since(at)
+  if (lines.length !== 1) throw new Error(`case 33: ${lines.length} lines\n${lines.join("\n")}`)
+  if (!lines[0].includes("idle, this OpenCode has no session hooks (incompatible plugin API)")) {
+    throw new Error(`case 33: ${lines[0]}`)
+  }
+  if (h.switches.length !== 0) throw new Error(`case 33 switched: ${JSON.stringify(h.switches)}`)
+  console.log("33 ok no session hooks -> one line, idle")
+}
+
+// 34. An OpenCode without model.list: same contract.
+{
+  const sessions = base({})
+  const h = host(sessions, { freeModels: FREE, freeAgents: ["explore"] })
+  h.ctx.model = {}
+  const at = mark()
+  await plugin.setup(h.ctx)
+  const lines = since(at)
+  if (lines.length !== 1) throw new Error(`case 34: ${lines.length} lines\n${lines.join("\n")}`)
+  if (!lines[0].includes("idle, this OpenCode has no model.list (incompatible plugin API)")) {
+    throw new Error(`case 34: ${lines[0]}`)
+  }
+  if (h.switches.length !== 0) throw new Error(`case 34 switched: ${JSON.stringify(h.switches)}`)
+  console.log("34 ok no model.list -> one line, idle")
+}
+
+// 35. An OpenCode without an event stream: setup still resolves and says the
+//     subagents keep their model.
+{
+  const sessions = base({})
+  const h = host(sessions, { freeModels: FREE, freeAgents: ["explore"] })
+  delete h.ctx.event
+  const at = mark()
+  await plugin.setup(h.ctx)
+  const lines = since(at)
+  if (lines.length !== 1) throw new Error(`case 35: ${lines.length} lines\n${lines.join("\n")}`)
+  if (!lines[0].includes("no event stream; subagents keep their model")) throw new Error(`case 35: ${lines[0]}`)
+  if (h.switches.length !== 0) throw new Error(`case 35 switched: ${JSON.stringify(h.switches)}`)
+  console.log("35 ok no event stream -> one line, idle")
 }
 
 console.log("all offline cases passed")

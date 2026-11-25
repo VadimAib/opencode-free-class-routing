@@ -75,8 +75,8 @@ whole sentence.
 Node 24 runs both suites directly, with no build step and no dependencies:
 
 ```sh
-node test/route.test.mjs   # 32 cases, offline, no model calls
-node test/e2e.test.mjs     # 7 cases: setup, a session.created event, the retry hook, the log file
+node test/route.test.mjs   # 35 cases, offline, no model calls
+node test/e2e.test.mjs     # 9 cases: setup, session.created, the retry hook, two loaded copies, stop(), the log file
 ```
 
 There is no `package.json` on purpose: OpenCode loads `index.ts` by path, so a
