@@ -56,6 +56,28 @@ No package manager, no build step: OpenCode loads `index.ts` directly.
 - If the root session itself runs on a free model, that choice wins.
 - The class comes from `session.agent`, never from the text of the prompt.
 
+## Visible decision
+
+The child carries the router's decision itself, so nobody has to open the log:
+
+- Its title gets one suffix: ` · trusted`, or ` · free:<model-id>` for example
+  `Ревью SET-3: correctness · free:deepseek-v4.1-flash-free`. A free-class child
+  that had to keep a paid model is labelled ` · free`, so the title never calls a
+  paid model free; its metadata names the model actually used.
+- Its metadata gets the machine-readable form:
+  `{ "class": "free", "model": "opencode/deepseek-v4.1-flash-free", "parent": "acme/paid-model-1" }`.
+
+The suffix is replaced, not appended, so a duplicate event or a plugin reload
+cannot grow the title. The root session is never touched. This writes a title and
+metadata, but no message: no prompt and no synthetic input. A host that refuses
+the update, or an OpenCode too old to have `session.update`, keeps routing: the
+failure is one log line and the child keeps its model. A measured free child kept
+its labelled title after its first real prompt.
+
+The parent chat shows a subagent card with the agent name and the task
+description, not the child's title. The label is visible in the child's own header
+and in the session list; open the child from that card to see it.
+
 ## Logs
 
 One line per decision on stderr, and the same line in
@@ -75,8 +97,8 @@ whole sentence.
 Node 24 runs both suites directly, with no build step and no dependencies:
 
 ```sh
-node test/route.test.mjs   # 35 cases, offline, no model calls
-node test/e2e.test.mjs     # 9 cases: setup, session.created, the retry hook, two loaded copies, stop(), the log file
+node test/route.test.mjs   # 40 cases, offline, no model calls
+node test/e2e.test.mjs     # 11 cases: setup, session.created, the retry hook, two loaded copies, stop(), the log file, the title/metadata label
 ```
 
 There is no `package.json` on purpose: OpenCode loads `index.ts` by path, so a

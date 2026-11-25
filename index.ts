@@ -101,6 +101,35 @@ export function formatRef(ref: Ref): string {
   return `${ref.providerID}/${ref.id}${ref.variant ? `#${ref.variant}` : ""}`
 }
 
+/** The fallback a new session carries before the host gives it a title. */
+const TITLE_FALLBACK = /^(?:New|Child) session - \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})$/
+
+/** The suffixes this plugin adds; all trailing ones are stripped, so a reload cannot grow the title. */
+const TITLE_SUFFIX = /(?:\s+·\s+(?:trusted|free:\S+))+$/u
+
+/** A human label that carries the class and, for a free child on a free model, that model. */
+export function routeLabel(title: unknown, cls: ClassName, model: Ref | undefined, free: boolean): string {
+  const text = typeof title === "string" ? title : ""
+  const base = TITLE_FALLBACK.test(text) ? "" : text.replace(TITLE_SUFFIX, "").trim()
+  const suffix = cls === "trusted" ? "trusted" : model && free ? `free:${model.id}` : "free"
+  return `${base || "Child session"} · ${suffix}`
+}
+
+/** A label write is cosmetic: a host that never answers must not hold the route. */
+const LABEL_TIMEOUT_MS = 1500
+
+function withTimeout(work: Promise<unknown>, ms: number): Promise<unknown> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  return Promise.race([
+    work,
+    new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error("timeout")), ms)
+    }),
+  ]).finally(() => {
+    if (timer) clearTimeout(timer)
+  })
+}
+
 /** Same model; a variant never makes a different model for this plugin. */
 export function sameModel(left: Ref | undefined, right: Ref | undefined): boolean {
   return Boolean(left && right && left.providerID === right.providerID && left.id === right.id)
@@ -347,6 +376,39 @@ export default {
       say(line)
     }
 
+    /**
+     * Shows the decision on the child itself: its title carries the class and,
+     * for a free child on a free model, the model; its metadata carries the
+     * same facts for an API reader. The session is read again here so a host
+     * title or metadata written since the event is not overwritten by a stale
+     * copy. A host without session.update keeps routing, just silently. A
+     * failed or slow label is one line and never a failed turn.
+     */
+    const label = async (sessionID: string, cls: ClassName, chosen: Ref | undefined, parent: Ref | undefined, free: boolean) => {
+      if (!ctx.session || typeof ctx.session.update !== "function") return
+      try {
+        const current = await sessionInfo(sessionID)
+        // No fresh record: leave the real title and metadata alone.
+        if (!current) return
+        const title = routeLabel(current.title, cls, chosen, free)
+        const previous = current.metadata && typeof current.metadata === "object" && !Array.isArray(current.metadata) ? current.metadata : {}
+        const model = chosen ? formatRef(chosen) : null
+        const parentRef = parent ? formatRef(parent) : null
+        if (current.title === title && previous.class === cls && previous.model === model && previous.parent === parentRef) return
+        await withTimeout(
+          ctx.session.update({
+            sessionID,
+            title,
+            metadata: { ...previous, class: cls, model, parent: parentRef },
+          }),
+          LABEL_TIMEOUT_MS,
+        )
+      } catch (error) {
+        const message = error instanceof Error ? error.message : error
+        notice(sessionID, `${TAG}: could not label subagent ${clean(sessionID)} (${clean(message)}); routing continues`)
+      }
+    }
+
     const day = () => new Date().toDateString()
     const markExhausted = (ref: Ref) => {
       exhausted.set(keyOf(ref), Date.now())
@@ -472,6 +534,8 @@ export default {
         sessionID,
         `${TAG}: agent=${clean(agent ?? "?")} class=${cls} model=${chosen ? clean(formatRef(chosen)) : "unknown"} parent=${parent ? clean(formatRef(parent)) : "unknown"} reason=${clean(reason)}`,
       )
+      const free = chosen ? isFreeRef(chosen, catalog, explicit) : false
+      await label(sessionID, cls, chosen, parent, free)
       return { switched, cls }
     }
 

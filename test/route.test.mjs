@@ -45,6 +45,7 @@ function host(sessions, options) {
   globalThis.__freeClassRetrySeen = new Set()
   globalThis.__freeClassExhausted = new Map()
   const switches = []
+  const updates = []
   const retry = {}
   let push
   const queue = []
@@ -62,6 +63,10 @@ function host(sessions, options) {
         switches.push([sessionID, `${model.providerID}/${model.id}`])
         sessions[sessionID] = { ...sessions[sessionID], model }
       },
+      update: async ({ sessionID, title, metadata }) => {
+        updates.push({ sessionID, title, metadata })
+        sessions[sessionID] = { ...sessions[sessionID], title, metadata }
+      },
       hook: async (name, fn) => {
         retry[name] = fn
       },
@@ -78,11 +83,11 @@ function host(sessions, options) {
       },
     },
   }
-  return { ctx, switches, retry, push: (e) => push(e) }
+  return { ctx, switches, updates, retry, push: (e) => push(e) }
 }
 
-async function tick(cond, label) {
-  for (let i = 0; i < 100; i++) {
+async function tick(cond, label, tries = 100) {
+  for (let i = 0; i < tries; i++) {
     if (cond()) return
     await new Promise((r) => setTimeout(r, 10))
   }
@@ -219,6 +224,9 @@ const base = (extra) => ({
   await h.retry.retry(second)
   if (second.decision?.retry !== true) throw new Error("case 9: no retry decision")
   if (h.switches.at(-1)[1] !== "acme/paid-model-1") throw new Error(`case 9: ${JSON.stringify(h.switches)}`)
+  const last = h.updates.at(-1)
+  if (last?.title !== "Child session · free") throw new Error(`case 9 title: ${last?.title}`)
+  if (last?.metadata?.model !== "acme/paid-model-1") throw new Error(`case 9 metadata: ${JSON.stringify(last?.metadata)}`)
   console.log("9 ok free chain exhausted -> parent")
 }
 
@@ -471,6 +479,124 @@ const base = (extra) => ({
   if (!lines[0].includes("no event stream; subagents keep their model")) throw new Error(`case 35: ${lines[0]}`)
   if (h.switches.length !== 0) throw new Error(`case 35 switched: ${JSON.stringify(h.switches)}`)
   console.log("35 ok no event stream -> one line, idle")
+}
+
+// 36. The decision reaches the child itself: its title carries class and model,
+//     its metadata carries the same facts for an API reader.
+{
+  const sessions = base({
+    child: { id: "child", parentID: "root", agent: "explore", title: "Ревью SET-3: correctness", metadata: { host: "tag" }, model: PAID },
+  })
+  const h = host(sessions, { freeModels: FREE, freeAgents: ["explore"] })
+  await plugin.setup(h.ctx)
+  h.push({ data: { sessionID: "child", parentID: "root", agent: "explore" } })
+  await tick(() => h.switches.length === 1 && h.updates.length === 1, "label")
+  const update = h.updates[0]
+  if (update.sessionID !== "child") throw new Error(`case 36: ${JSON.stringify(update)}`)
+  if (update.title !== "Ревью SET-3: correctness · free:deepseek-v4.1-flash-free") throw new Error(`case 36 title: ${update.title}`)
+  const expected = { host: "tag", class: "free", model: FREE[0], parent: "acme/paid-model-1" }
+  if (JSON.stringify(update.metadata) !== JSON.stringify(expected)) throw new Error(`case 36 metadata: ${JSON.stringify(update.metadata)}`)
+  console.log("36 ok title, metadata and existing keys")
+}
+
+// 37. The label is idempotent: a duplicated event writes once, and a fresh
+//     process (the routing marker is gone) does not grow the title.
+{
+  const sessions = base({
+    child: { id: "child", parentID: "root", agent: "explore", title: "Ревью SET-3: correctness", model: PAID },
+  })
+  const options = { freeModels: FREE, freeAgents: ["explore"] }
+  const h = host(sessions, options)
+  await plugin.setup(h.ctx)
+  const event = { data: { sessionID: "child", parentID: "root", agent: "explore" } }
+  h.push(event)
+  h.push(event)
+  await tick(() => h.switches.length === 1 && h.updates.length === 1, "one label")
+  await new Promise((r) => setTimeout(r, 120))
+  if (h.updates.length !== 1) throw new Error(`case 37: ${h.updates.length} labels in one process`)
+  const labelled = sessions.child.title
+  if (labelled !== "Ревью SET-3: correctness · free:deepseek-v4.1-flash-free") throw new Error(`case 37 title: ${labelled}`)
+
+  const again = host(sessions, options)
+  // The host dropped the metadata; the title still carries the old suffix.
+  delete sessions.child.metadata
+  await plugin.setup(again.ctx)
+  again.push(event)
+  await tick(() => again.switches.length === 1, "reload route")
+  await new Promise((r) => setTimeout(r, 50))
+  if (again.updates.length !== 1) throw new Error(`case 37: ${again.updates.length} labels after a reload`)
+  for (const update of again.updates) {
+    const separators = update.title.match(/ · /g)?.length ?? 0
+    if (separators !== 1 || !update.title.startsWith("Ревью SET-3: correctness · ")) {
+      throw new Error(`case 37 grew: ${update.title}`)
+    }
+  }
+  console.log("37 ok duplicate event and reload keep one suffix")
+}
+
+// 38. An unavailable session API costs one line; the child is still routed.
+{
+  const sessions = base({
+    child: { id: "child", parentID: "root", agent: "explore", title: "Ревью SET-3: correctness", model: PAID },
+  })
+  const h = host(sessions, { freeModels: FREE, freeAgents: ["explore"] })
+  h.ctx.session.update = async () => {
+    throw new Error("api down")
+  }
+  const at = mark()
+  await plugin.setup(h.ctx)
+  h.push({ data: { sessionID: "child", parentID: "root", agent: "explore" } })
+  await tick(() => h.switches.length === 1 && since(at).length === 2, "label failure")
+  const lines = since(at)
+  if (!lines.some((line) => line.includes("could not label subagent child (api down); routing continues"))) {
+    throw new Error(`case 38: ${lines.join("\n")}`)
+  }
+  if (!lines.some((line) => line.includes(`agent=explore class=free model=${FREE[0]}`))) {
+    throw new Error(`case 38 decision missing: ${lines.join("\n")}`)
+  }
+  console.log("38 ok label failure keeps the route")
+}
+
+// 39. A session API that accepts the write and never answers costs one line
+//     after the label timeout; the child is still routed.
+{
+  const sessions = base({
+    child: { id: "child", parentID: "root", agent: "explore", title: "Ревью SET-3: correctness", model: PAID },
+  })
+  const h = host(sessions, { freeModels: FREE, freeAgents: ["explore"] })
+  h.ctx.session.update = () => new Promise(() => {})
+  const at = mark()
+  await plugin.setup(h.ctx)
+  h.push({ data: { sessionID: "child", parentID: "root", agent: "explore" } })
+  await tick(() => h.switches.length === 1 && since(at).length === 2, "label timeout", 300)
+  const lines = since(at)
+  if (!lines.some((line) => line.includes("could not label subagent child (timeout); routing continues"))) {
+    throw new Error(`case 39: ${lines.join("\n")}`)
+  }
+  if (!lines.some((line) => line.includes(`agent=explore class=free model=${FREE[0]}`))) {
+    throw new Error(`case 39 decision missing: ${lines.join("\n")}`)
+  }
+  console.log("39 ok hung label times out, route continues")
+}
+
+// 40. Label edge cases: empty and host fallback titles, an offset timestamp,
+//     a free class on a paid model, and repeated suffixes.
+{
+  const free = { providerID: "opencode", id: "free-1" }
+  const paid = { providerID: "acme", id: "paid-model-1" }
+  const cases = [
+    [undefined, "free", free, true, "Child session · free:free-1"],
+    ["", "trusted", paid, false, "Child session · trusted"],
+    ["New session - 2026-11-25T10:00:00Z", "trusted", paid, false, "Child session · trusted"],
+    ["Child session - 2026-11-25T10:00:00.123+03:00", "free", free, true, "Child session · free:free-1"],
+    ["X", "free", paid, false, "X · free"],
+    ["X · free:a · free:b", "trusted", paid, false, "X · trusted"],
+  ]
+  for (const [title, cls, model, isFree, expected] of cases) {
+    const actual = api.routeLabel(title, cls, model, isFree)
+    if (actual !== expected) throw new Error(`case 40: ${JSON.stringify({ title, cls, expected, actual })}`)
+  }
+  console.log("40 ok label edge cases")
 }
 
 console.log("all offline cases passed")

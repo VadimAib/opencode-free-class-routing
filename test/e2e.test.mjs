@@ -36,6 +36,7 @@ function host(sessions, options, { reset = true, late = false } = {}) {
     globalThis.__freeClassExhausted = new Map()
   }
   const switches = []
+  const updates = []
   const retry = {}
   let push
   const queue = []
@@ -54,6 +55,10 @@ function host(sessions, options, { reset = true, late = false } = {}) {
       switchModel: async ({ sessionID, model }) => {
         switches.push(`${sessionID} ${model.providerID}/${model.id}`)
         sessions[sessionID] = { ...sessions[sessionID], model }
+      },
+      update: async ({ sessionID, title, metadata }) => {
+        updates.push({ sessionID, title, metadata })
+        sessions[sessionID] = { ...sessions[sessionID], title, metadata }
       },
       hook: async (name, fn) => {
         retry[name] = fn
@@ -77,7 +82,7 @@ function host(sessions, options, { reset = true, late = false } = {}) {
       },
     },
   }
-  return { ctx, switches, retry, push: (event) => push(event), pending: () => queue.length }
+  return { ctx, switches, updates, retry, push: (event) => push(event), pending: () => queue.length }
 }
 
 async function tick(cond, label) {
@@ -335,6 +340,60 @@ const sessions = () => ({
     throw new Error(`case 9: model moved to ${JSON.stringify(s.child2.model)}`)
   }
   console.log("9 ok late event after stop -> nothing routed, no line")
+}
+
+// 10. Both classes leave a visible label: the free child names its model, the
+//     trusted one says so; a duplicate created event does not write twice.
+{
+  const s = sessions()
+  s.child = { ...s.child, title: "Ревью SET-3: correctness" }
+  s.child2 = { id: "child2", parentID: "root", agent: "general", title: "Ревью SET-3: plan", model: ref(PAID) }
+  const h = host(s, { freeModels: FREE, freeAgents: ["explore"] })
+  const stop = await plugin.setup(h.ctx)
+  h.push({ data: { sessionID: "child", parentID: "root", agent: "explore" } })
+  h.push({ data: { sessionID: "child", parentID: "root", agent: "explore" } })
+  h.push({ data: { sessionID: "child2", parentID: "root", agent: "general" } })
+  await tick(() => h.updates.some((update) => update.sessionID === "child2"), "two labels")
+  await settle()
+  if (h.updates.length !== 2) throw new Error(`case 10: ${h.updates.length} labels\n${JSON.stringify(h.updates)}`)
+  const free = h.updates.find((update) => update.sessionID === "child")
+  const trusted = h.updates.find((update) => update.sessionID === "child2")
+  if (free?.title !== `Ревью SET-3: correctness · free:${FREE[0].split("/").slice(1).join("/")}`) {
+    throw new Error(`case 10 free: ${free?.title}`)
+  }
+  if (free?.metadata?.class !== "free" || free.metadata.model !== FREE[0] || free.metadata.parent !== PAID) {
+    throw new Error(`case 10 free metadata: ${JSON.stringify(free?.metadata)}`)
+  }
+  if (trusted?.title !== "Ревью SET-3: plan · trusted") throw new Error(`case 10 trusted: ${trusted?.title}`)
+  if (trusted?.metadata?.class !== "trusted" || trusted.metadata.model !== PAID || trusted.metadata.parent !== PAID) {
+    throw new Error(`case 10 trusted metadata: ${JSON.stringify(trusted?.metadata)}`)
+  }
+  stop()
+  console.log("10 ok both labels, duplicate event wrote once")
+}
+
+// 11. A session API that refuses the label still routes: one line about the
+//     label, one decision line, and the switch happened.
+{
+  const s = sessions()
+  s.child = { ...s.child, title: "Ревью SET-3: correctness" }
+  const h = host(s, { freeModels: FREE, freeAgents: ["explore"] })
+  h.ctx.session.update = async () => {
+    throw new Error("api down")
+  }
+  const at = mark()
+  const stop = await plugin.setup(h.ctx)
+  h.push({ data: { sessionID: "child", parentID: "root", agent: "explore" } })
+  await tick(() => h.switches.length === 1 && since(at).length === 2, "label failure")
+  const lines = since(at)
+  if (!lines.some((line) => line.includes("could not label subagent child (api down); routing continues"))) {
+    throw new Error(`case 11: ${lines.join("\n")}`)
+  }
+  if (!lines.some((line) => line.includes(`agent=explore class=free model=${FREE[0]}`))) {
+    throw new Error(`case 11 decision missing: ${lines.join("\n")}`)
+  }
+  stop()
+  console.log("11 ok label failure keeps the route")
 }
 
 console.log("e2e cases passed, log at", LOG)
